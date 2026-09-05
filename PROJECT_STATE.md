@@ -1,6 +1,6 @@
 # Project State — MS Trend Matrix Python Port
 
-Last updated: 2026-09-05 by QA approval of data_handler.py
+Last updated: 2026-09-05 by Git branch reconciliation (single tracking main branch)
 
 ## Module status
 | Module | Status | Spec sections | Notes |
@@ -17,6 +17,9 @@ Last updated: 2026-09-05 by QA approval of data_handler.py
 | engine.py | not started | engine-spec §10 | orchestrator, build last |
 | config.py | not started | port-spec §10/§14, §11 (locked: every field must be here) | |
 | run.py | not started | engine-spec §12 | |
+
+## Infrastructure & Git History
+- **2026-09-05**: Reconciled initial diverged branches on GitHub remote (`git@github.com:Sophara-Rith/backtesting-engine.git`). Renamed local `master` to `main`, pushed to replace the empty initial web-UI commit on `origin/main` via `--force-with-lease`, deleted redundant `origin/master`, and configured `main` to track `origin/main`.
 
 ## Locked decisions (do not re-litigate — see port-spec §13 for full detail)
 1. Risk-sizing gate (port-spec §7): FIXED to check mode-appropriate distance, not
@@ -36,4 +39,4 @@ Last updated: 2026-09-05 by QA approval of data_handler.py
 (none yet — update as they arise)
 
 ## Next task
-Awaiting repository remote setup task / next module assignment from the operator.
+Awaiting repository remote setup task (.gitignore hardening / README) from the operator.
