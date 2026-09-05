@@ -1,12 +1,12 @@
 # Project State — MS Trend Matrix Python Port
 
-Last updated: 2026-09-05 by QA approval of events.py (starting data_handler.py)
+Last updated: 2026-09-05 by Implementation of data_handler.py (pending QA review)
 
 ## Module status
 | Module | Status | Spec sections | Notes |
 |---|---|---|---|
 | events.py | implemented, QA-approved | port-spec §9, engine-spec §1 | dataclasses defined with ladder extensions + exit_tag threading |
-| data_handler.py | not started | port-spec §2 QA §15.2, engine-spec §2 | |
+| data_handler.py | implemented, pending QA review | port-spec §2 QA §15.2, engine-spec §2 | OANDA tick-volume NaN coercion, no look-ahead, strict current_time |
 | strategy.py | not started | port-spec §1-8, QA §15.3-15.8 | largest module, may need multiple sessions |
 | portfolio.py | not started | port-spec §9, QA §15.7 | ladder partial-close logic |
 | execution.py | not started | engine-spec §6 | |
@@ -36,4 +36,4 @@ Last updated: 2026-09-05 by QA approval of events.py (starting data_handler.py)
 (none yet — update as they arise)
 
 ## Next task
-Implementation of data_handler.py.
+Awaiting QA review of data_handler.py from the operator.
