@@ -1,6 +1,6 @@
 # Project State — MS Trend Matrix Python Port
 
-Last updated: 2026-09-05 by Git branch reconciliation (single tracking main branch)
+Last updated: 2026-09-05 by Repository hardening (.gitignore secrets + README)
 
 ## Module status
 | Module | Status | Spec sections | Notes |
@@ -20,6 +20,7 @@ Last updated: 2026-09-05 by Git branch reconciliation (single tracking main bran
 
 ## Infrastructure & Git History
 - **2026-09-05**: Reconciled initial diverged branches on GitHub remote (`git@github.com:Sophara-Rith/backtesting-engine.git`). Renamed local `master` to `main`, pushed to replace the empty initial web-UI commit on `origin/main` via `--force-with-lease`, deleted redundant `origin/master`, and configured `main` to track `origin/main`.
+- **2026-09-05**: Hardened `.gitignore` with comprehensive secret/credential exclusion patterns, verified no sensitive data or credentials exist in git history, and created `README.md`.
 
 ## Locked decisions (do not re-litigate — see port-spec §13 for full detail)
 1. Risk-sizing gate (port-spec §7): FIXED to check mode-appropriate distance, not
@@ -39,4 +40,4 @@ Last updated: 2026-09-05 by Git branch reconciliation (single tracking main bran
 (none yet — update as they arise)
 
 ## Next task
-Awaiting repository remote setup task (.gitignore hardening / README) from the operator.
+Awaiting next module assignment (strategy.py or oanda_download integration) from the operator.
