@@ -449,6 +449,12 @@ implementation.
   accepted divergence from live/TradingView behavior per the engine spec's stated v1 scope —
   flagging here so it's not mistaken for a porting error later.
 - Reversal/pyramiding: not applicable — strategy is flat-only by construction (§3).
+- **OANDA auto-download integration — deferred, not forgotten.** Tii has a standalone
+  `oanda_download.py` script (fetches XAUUSD M5 candles via OANDA's REST API, pages past the
+  5000-candle-per-request limit, writes the same `time,open,high,low,close,volume` CSV shape
+  `DataHandler` expects). The idea of having the engine auto-fetch missing data instead of
+  requiring a manual pre-run of that script is a good one, but is explicitly **out of scope for
+  `data_handler.py` itself** — see decision #7 below for the reasoning and the planned approach.
 
 ---
 
@@ -462,6 +468,7 @@ implementation.
 | 4 | Timeframe | **M5** — `bars_per_year = 288 × 252` |
 | 5 | Data source | **OANDA OHLC CSV**, tick-count volume (expected/correct for VWAP, same as live) |
 | 6 | T1/T2 ladder % base | **% of original position size**, confirmed by example (0.1 lot → 60% T1 = 0.06 lot) |
+| 7 | OANDA auto-download | **Deferred** — kept as its own module/prompt AFTER `data_handler.py` is QA-approved, not folded into it. Reasons: (a) both specs lock deps to pandas/numpy/matplotlib only — `requests` is a new dependency needing an explicit decision, not a silent addition; (b) API-token/secret handling doesn't belong in a deterministic, pure CSV-loader component; (c) network fetch inside a backtest run risks non-reproducible runs (today's fetch ≠ yesterday's if new bars have accumulated). Planned shape: a separate small module (e.g. `backtest/data_fetch.py`) or keep `oanda_download.py` standalone, with `run.py` optionally invoking it as an explicit pre-step when the configured `csv_path` doesn't exist — never automatically mid-run. |
 
 ## 14. Answered — locked
 
