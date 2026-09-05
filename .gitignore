@@ -21,6 +21,15 @@ data/*.gz
 outputs/*
 !outputs/.gitkeep
 
+# Secrets / credentials - never commit
+.env
+.env.*
+*.token
+secrets.py
+secrets.json
+config.local.py
+**/credentials*
+
 # Operating System and IDE files
 .DS_Store
 Thumbs.db
