@@ -1,11 +1,11 @@
 # Project State — MS Trend Matrix Python Port
 
-Last updated: 2026-09-05 by Environment & Safety Setup (Initial scaffolding)
+Last updated: 2026-09-05 by Implementation of events.py (pending QA review)
 
 ## Module status
 | Module | Status | Spec sections | Notes |
 |---|---|---|---|
-| events.py | not started | port-spec §9, engine-spec §1 | |
+| events.py | implemented, pending QA review | port-spec §9, engine-spec §1 | dataclasses defined with ladder extensions + exit_tag threading |
 | data_handler.py | not started | port-spec §2 QA §15.2, engine-spec §2 | |
 | strategy.py | not started | port-spec §1-8, QA §15.3-15.8 | largest module, may need multiple sessions |
 | portfolio.py | not started | port-spec §9, QA §15.7 | ladder partial-close logic |
@@ -36,4 +36,4 @@ Last updated: 2026-09-05 by Environment & Safety Setup (Initial scaffolding)
 (none yet — update as they arise)
 
 ## Next task
-Awaiting first module assignment from the operator.
+Awaiting QA review of events.py from the operator.

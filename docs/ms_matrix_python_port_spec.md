@@ -262,7 +262,7 @@ class SignalEvent:
     symbol: str = "XAUUSD"
     direction: int = 0             # 1=long, -1=short, 0=flat/close
     strength: float = 1.0          # sizing hint (risk-based qty, see §7) — used on ENTRY signals only
-    close_fraction: Optional[float] = None   # 0.0–1.0 of CURRENT position to close; None = full close/no exit change
+    close_fraction: Optional[float] = None   # 0.0–1.0 of ORIGINAL entry quantity to close (T1/T2); None = full close of whatever remains (T3/SL/EARLY)
     exit_tag: Optional[str] = None           # "T1" | "T2" | "T3" | "SL" | "EARLY" — for trade_log labeling
     sl_price: Optional[float] = None         # attached on entry signals so Portfolio can store it on the Position
     tp_prices: Optional[list] = None         # [tp1, tp2, tp3] attached on entry signals, ladder-aware
