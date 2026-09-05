@@ -3,19 +3,23 @@ strategy.py — MS Trend Matrix 5-Gate Strategy port and indicator state.
 
 Governed by:
 - backtest_engine_spec.md §3 (Strategy class structure, on_bar, on_fill)
-- ms_matrix_python_port_spec.md §1 (Strategy state), §2 (Indicator porting), QA §15.3
+- ms_matrix_python_port_spec.md §1 (State table), §2 (Indicator porting),
+  §3 (5 gates & ChoCh), §4 (Trigger candles & wick-source fix), §6 (Ladder target sequencing)
+- QA checklist §15.3, §15.4
 
-Status: Slice 1 of 4 (State & Indicators) implemented.
+Status: Slices 1 & 2 of 4 implemented (State, Indicators, ChoCh, 5 Gates, Entry Signals).
 """
 
 from collections import deque
+from datetime import datetime, time, timezone
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 import pandas as pd
 
 try:
-    from .events import FillEvent, MarketEvent, SignalEvent
+    from .events import EventType, FillEvent, MarketEvent, SignalEvent
 except ImportError:
-    from events import FillEvent, MarketEvent, SignalEvent
+    from events import EventType, FillEvent, MarketEvent, SignalEvent
 
 
 class _Bar:
@@ -30,6 +34,27 @@ class _Bar:
         self.close = close
         self.volume = volume
         self.timestamp = timestamp
+
+
+def _is_time_in_session(t: time, session_str: str) -> bool:
+    """
+    Check if a datetime.time falls within [start, end) for a session formatted 'HHMM-HHMM'.
+    Assumes same-day session windows (per port-spec §2 v1 scope).
+    """
+    if not session_str or "-" not in session_str:
+        return False
+    parts = session_str.split("-")
+    if len(parts) != 2:
+        return False
+    start_str, end_str = parts[0].strip(), parts[1].strip()
+    start_time = time(int(start_str[:2]), int(start_str[2:4]))
+    end_time = time(int(end_str[:2]), int(end_str[2:4]))
+
+    if start_time <= end_time:
+        return start_time <= t < end_time
+    else:
+        # Cross-midnight window support for completeness
+        return t >= start_time or t < end_time
 
 
 class Strategy:
@@ -51,7 +76,10 @@ class Strategy:
 
         # --- Daily trade cap tracking ---
         self.trades_today: int = 0
-        self.last_trade_day = None               # date of the last bar processed, for day-change detection
+        self.last_trade_day = None               # date of the last bar processed (in session_timezone)
+
+        # --- Flat / in-position state (managed fully in slice 4; checked here for flat-only entry) ---
+        self.in_position: bool = False
 
         # --- Active position levels (populated at entry, used by exits - slices 3/4) ---
         self.active_sl: Optional[float] = None
@@ -60,11 +88,14 @@ class Strategy:
         self.active_tp3: Optional[float] = None
         self.active_entry: Optional[float] = None
 
+        # --- Trigger wick references (computed unconditionally every bar for slice 3 SL) ---
+        self.trig_wick_low_bull: Optional[float] = None
+        self.trig_wick_high_bear: Optional[float] = None
+
         # --- Bar counter (needed for pivot index bookkeeping) ---
         self.bar_index: int = -1   # incremented to 0 on the first on_bar call
 
         # --- OHLC ring buffer for pivot detection + 1-bar-back lookups ---
-        # size = 2*ms_len + 2 per port-spec §1's recommendation
         buffer_size = 2 * self.config.ms_len + 2
         self.bar_buffer: deque = deque(maxlen=buffer_size)
 
@@ -95,10 +126,251 @@ class Strategy:
 
     def on_bar(self, event: MarketEvent) -> Optional[SignalEvent]:
         """
-        Consume a MarketEvent, update indicator buffers and internal state.
-        Returns None unconditionally in Slice 1 (no gate/entry/exit evaluation yet).
+        Called once per bar:
+        1. Capture previous-bar state (for crossover/crossunder and trigger comparisons)
+        2. Update all indicators and ring buffers
+        3. Evaluate ChoCh and update trend direction & ladder targets if direction changed
+        4. Evaluate trigger candle patterns and wick references
+        5. Evaluate 5 gates + session time filter + daily limit
+        6. Emit SignalEvent on entry conditions if flat
         """
+        # 1. Capture state before this bar's indicator updates
+        prev_bar = self.bar_buffer[-1] if len(self.bar_buffer) > 0 else None
+        prev_ph_val = self.ph_val
+        prev_pl_val = self.pl_val
+        previous_direction = self.direction
+
+        # 2. Update indicators and ring buffer
         self._update_indicators(event)
+
+        close = event.close
+        open_price = event.open
+        high = event.high
+        low = event.low
+
+        prev_close = prev_bar.close if prev_bar is not None else None
+        prev_open = prev_bar.open if prev_bar is not None else open_price
+        prev_high = prev_bar.high if prev_bar is not None else high
+        prev_low = prev_bar.low if prev_bar is not None else low
+
+        # 3. ChoCh detection & Direction Change update
+        if prev_close is not None and prev_ph_val is not None and self.ph_val is not None:
+            crossover_ph = (prev_close <= prev_ph_val) and (close > self.ph_val)
+        else:
+            crossover_ph = False
+
+        if prev_close is not None and prev_pl_val is not None and self.pl_val is not None:
+            crossunder_pl = (prev_close >= prev_pl_val) and (close < self.pl_val)
+        else:
+            crossunder_pl = False
+
+        bull_choch = crossover_ph and (self.direction is None or self.direction is False)
+        bear_choch = crossunder_pl and (self.direction is True)
+
+        step = (self.atr * self.config.target_step_mult) if self.atr is not None else 0.0
+
+        if bull_choch:
+            self.direction = True
+            self.trend_entry_price = self.ph_val
+            self.current_target = self.trend_entry_price + step
+        elif bear_choch:
+            self.direction = False
+            self.trend_entry_price = self.pl_val
+            self.current_target = self.trend_entry_price - step
+
+        direction_change = (self.direction != previous_direction)
+        if direction_change and self.direction is not None and self.current_target is not None:
+            if self.direction:
+                self.t1_level = self.current_target
+                self.t2_level = self.current_target + step
+                self.t3_level = self.current_target + step * 2.0
+            else:
+                self.t1_level = self.current_target
+                self.t2_level = self.current_target - step
+                self.t3_level = self.current_target - step * 2.0
+
+        # 4. Trigger candle pattern definitions (§4)
+        body_size = abs(close - open_price)
+        prev_body_size = abs(prev_close - prev_open) if prev_close is not None else body_size
+        lower_wick = min(open_price, close) - low
+        upper_wick = high - max(open_price, close)
+
+        atr_val = self.atr if self.atr is not None else 0.0
+        near_ema = abs(close - self.ema55) <= atr_val * self.config.proximity_atr_mult if self.ema55 is not None else False
+        near_vwap = abs(close - self.vwap) <= atr_val * self.config.proximity_atr_mult if self.vwap is not None else False
+        near_level = near_ema or near_vwap
+
+        pin_bar_bull = lower_wick > body_size * 1.5 and near_level and close > open_price
+        pin_bar_bear = upper_wick > body_size * 1.5 and near_level and close < open_price
+
+        if prev_close is not None:
+            engulf_bull = (
+                close > open_price
+                and prev_close < prev_open
+                and body_size >= prev_body_size * self.config.engulf_min_body
+                and close > prev_open
+                and open_price < prev_close
+            )
+            engulf_bear = (
+                close < open_price
+                and prev_close > prev_open
+                and body_size >= prev_body_size * self.config.engulf_min_body
+                and close < prev_open
+                and open_price > prev_close
+            )
+        else:
+            engulf_bull = False
+            engulf_bear = False
+
+        break_bull = close > prev_high
+        break_bear = close < prev_low
+
+        retest_bull = self.ph_val is not None and low <= self.ph_val and close > self.ph_val
+        retest_bear = self.pl_val is not None and high >= self.pl_val and close < self.pl_val
+
+        # Gate 5 raw evaluation
+        trig_bull_raw = (
+            (self.config.trig_pin_bar and pin_bar_bull)
+            or (self.config.trig_engulf and engulf_bull)
+            or (self.config.trig_break and break_bull)
+            or (self.config.trig_retest and retest_bull)
+        )
+        trig_bear_raw = (
+            (self.config.trig_pin_bar and pin_bar_bear)
+            or (self.config.trig_engulf and engulf_bear)
+            or (self.config.trig_break and break_bear)
+            or (self.config.trig_retest and retest_bear)
+        )
+
+        gate5_bull = (not self.config.use_gate_trigger) or trig_bull_raw
+        gate5_bear = (not self.config.use_gate_trigger) or trig_bear_raw
+
+        # Wick-source fix (§4): priority pin bar > break > retest > engulfing
+        other_patterns_bull = (
+            (self.config.trig_pin_bar and pin_bar_bull)
+            or (self.config.trig_break and break_bull)
+            or (self.config.trig_retest and retest_bull)
+        )
+        engulf_is_the_trigger_bull = (
+            self.config.use_gate_trigger
+            and self.config.trig_engulf
+            and engulf_bull
+            and not other_patterns_bull
+        )
+
+        other_patterns_bear = (
+            (self.config.trig_pin_bar and pin_bar_bear)
+            or (self.config.trig_break and break_bear)
+            or (self.config.trig_retest and retest_bear)
+        )
+        engulf_is_the_trigger_bear = (
+            self.config.use_gate_trigger
+            and self.config.trig_engulf
+            and engulf_bear
+            and not other_patterns_bear
+        )
+
+        self.trig_wick_low_bull = prev_low if engulf_is_the_trigger_bull else low
+        self.trig_wick_high_bear = prev_high if engulf_is_the_trigger_bear else high
+
+        # 5. Evaluate Gates 1-4
+        gate1_bull = (not self.config.use_gate_choch) or bull_choch
+        gate1_bear = (not self.config.use_gate_choch) or bear_choch
+
+        gate2_bull = (not self.config.use_gate_ema) or (self.ema55 is not None and close > self.ema55)
+        gate2_bear = (not self.config.use_gate_ema) or (self.ema55 is not None and close < self.ema55)
+
+        gate3_bull = (not self.config.use_gate_adx) or (self.adx is not None and self.adx > self.config.adx_threshold)
+        gate3_bear = (not self.config.use_gate_adx) or (self.adx is not None and self.adx > self.config.adx_threshold)
+
+        vwap_slope_len = self.config.vwap_slope_lookback + 1
+        if len(self.vwap_history) >= vwap_slope_len:
+            vwap_slope_up = self.vwap_history[-1] > self.vwap_history[0]
+            vwap_slope_down = self.vwap_history[-1] < self.vwap_history[0]
+        else:
+            vwap_slope_up = False
+            vwap_slope_down = False
+
+        gate4_bull = (not self.config.use_gate_vwap) or (self.vwap is not None and close > self.vwap and vwap_slope_up)
+        gate4_bear = (not self.config.use_gate_vwap) or (self.vwap is not None and close < self.vwap and vwap_slope_down)
+
+        # 6. Non-gate filters: Session time filter and daily trade limit
+        # Convert UTC event.timestamp to configured session_timezone using zoneinfo
+        ts = event.timestamp
+        if hasattr(ts, "to_pydatetime"):
+            dt_utc = ts.to_pydatetime()
+        elif isinstance(ts, str):
+            dt_utc = datetime.fromisoformat(ts)
+        elif isinstance(ts, datetime):
+            dt_utc = ts
+        else:
+            dt_utc = pd.to_datetime(ts).to_pydatetime()
+
+        if dt_utc.tzinfo is None:
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+
+        tz = ZoneInfo(self.config.session_timezone)
+        local_dt = dt_utc.astimezone(tz)
+        local_time = local_dt.time()
+        local_date = local_dt.date()
+
+        # Daily trade limit reset tracking
+        if self.last_trade_day != local_date:
+            self.trades_today = 0
+            self.last_trade_day = local_date
+
+        under_daily_limit = self.trades_today < self.config.max_trades_per_day
+
+        # Time window filter
+        if not self.config.use_time_filter:
+            time_ok = True
+        else:
+            in_s1 = _is_time_in_session(local_time, self.config.session_1)
+            in_s2 = _is_time_in_session(local_time, self.config.session_2)
+            in_window = in_s1 or in_s2
+            blocked = self.config.block_us_data and _is_time_in_session(local_time, self.config.us_data_session)
+            time_ok = in_window and not blocked
+
+        # 7. Entry signal emission (flat-only)
+        entry_long = (
+            all([gate1_bull, gate2_bull, gate3_bull, gate4_bull, gate5_bull])
+            and time_ok
+            and under_daily_limit
+            and not self.in_position
+        )
+        entry_short = (
+            all([gate1_bear, gate2_bear, gate3_bear, gate4_bear, gate5_bear])
+            and time_ok
+            and under_daily_limit
+            and not self.in_position
+        )
+
+        symbol = getattr(self.config, "symbol", "XAUUSD")
+
+        if entry_long:
+            self.trades_today += 1
+            return SignalEvent(
+                type=EventType.SIGNAL,
+                symbol=symbol,
+                direction=1,
+                strength=1.0,
+                sl_price=None,
+                tp_prices=None,
+                timestamp=event.timestamp,
+            )
+
+        if entry_short:
+            self.trades_today += 1
+            return SignalEvent(
+                type=EventType.SIGNAL,
+                symbol=symbol,
+                direction=-1,
+                strength=1.0,
+                sl_price=None,
+                tp_prices=None,
+                timestamp=event.timestamp,
+            )
+
         return None
 
     def on_fill(self, event: FillEvent) -> None:
