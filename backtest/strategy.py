@@ -4,10 +4,11 @@ strategy.py — MS Trend Matrix 5-Gate Strategy port and indicator state.
 Governed by:
 - backtest_engine_spec.md §3 (Strategy class structure, on_bar, on_fill)
 - ms_matrix_python_port_spec.md §1 (State table), §2 (Indicator porting),
-  §3 (5 gates & ChoCh), §4 (Trigger candles & wick-source fix), §6 (Ladder target sequencing)
-- QA checklist §15.3, §15.4
+  §3 (5 gates & ChoCh), §4 (Trigger candles & wick-source fix), §5 (SL calculation),
+  §6 (TP calculation & ladder target sequencing), §7 (Risk-sizing distance fix)
+- QA checklist §15.3, §15.4, §15.5, §15.6
 
-Status: Slices 1 & 2 of 4 implemented (State, Indicators, ChoCh, 5 Gates, Entry Signals).
+Status: Slices 1, 2 & 3 of 4 implemented (State, Indicators, ChoCh, 5 Gates, Entry Signals, SL/TP & Risk Sizing Distance).
 """
 
 from collections import deque
@@ -132,7 +133,10 @@ class Strategy:
         3. Evaluate ChoCh and update trend direction & ladder targets if direction changed
         4. Evaluate trigger candle patterns and wick references
         5. Evaluate 5 gates + session time filter + daily limit
-        6. Emit SignalEvent on entry conditions if flat
+        6. Compute Stop Loss prices across all 3 modes
+        7. Compute Take Profit prices across all 4 modes (including ladder targets)
+        8. Compute risk-sizing distance (§7 locked fix)
+        9. Emit SignalEvent on entry conditions if flat
         """
         # 1. Capture state before this bar's indicator updates
         prev_bar = self.bar_buffer[-1] if len(self.bar_buffer) > 0 else None
@@ -331,7 +335,7 @@ class Strategy:
             blocked = self.config.block_us_data and _is_time_in_session(local_time, self.config.us_data_session)
             time_ok = in_window and not blocked
 
-        # 7. Entry signal emission (flat-only)
+        # 7. Entry conditions check (flat-only)
         entry_long = (
             all([gate1_bull, gate2_bull, gate3_bull, gate4_bull, gate5_bull])
             and time_ok
@@ -345,29 +349,108 @@ class Strategy:
             and not self.in_position
         )
 
+        # 8. Stop Loss calculation (§5) — unconditional, computed every bar
+        atr_val = self.atr if self.atr is not None else 0.0
+        sl_distance_dyn_long = (close - self.trig_wick_low_bull) + atr_val * self.config.dyn_sl_atr_mult
+        sl_distance_dyn_short = (self.trig_wick_high_bear - close) + atr_val * self.config.dyn_sl_atr_mult
+
+        if self.config.sl_mode == "Dynamic (ATR/Matrix)":
+            sl_price_long = close - sl_distance_dyn_long
+            sl_price_short = close + sl_distance_dyn_short
+        elif self.config.sl_mode == "Fixed (Points)":
+            sl_price_long = close - self.config.fixed_sl_points
+            sl_price_short = close + self.config.fixed_sl_points
+        elif self.config.sl_mode == "Fixed (%)":
+            sl_price_long = close * (1.0 - self.config.fixed_sl_percent / 100.0)
+            sl_price_short = close * (1.0 + self.config.fixed_sl_percent / 100.0)
+        else:
+            sl_price_long = close - sl_distance_dyn_long
+            sl_price_short = close + sl_distance_dyn_short
+
+        # 9. Take Profit calculation (§6) — unconditional, computed every bar
+        sl_distance_actual_long = close - sl_price_long
+        sl_distance_actual_short = sl_price_short - close
+
+        if self.config.tp_mode == "Dynamic (ATR/Matrix)":
+            if self.config.dyn_tp_use_matrix:
+                tp_price_long = self.t3_level
+                tp_price_short = self.t3_level
+            else:
+                tp_price_long = close + atr_val * self.config.dyn_tp_flat_mult
+                tp_price_short = close - atr_val * self.config.dyn_tp_flat_mult
+        elif self.config.tp_mode == "Fixed RR":
+            tp_price_long = close + sl_distance_actual_long * self.config.rr_ratio
+            tp_price_short = close - sl_distance_actual_short * self.config.rr_ratio
+        elif self.config.tp_mode == "Fixed (Points)":
+            tp_price_long = close + self.config.fixed_tp_points
+            tp_price_short = close - self.config.fixed_tp_points
+        elif self.config.tp_mode == "Fixed (%)":
+            tp_price_long = close * (1.0 + self.config.fixed_tp_percent / 100.0)
+            tp_price_short = close * (1.0 - self.config.fixed_tp_percent / 100.0)
+        else:
+            tp_price_long = close + atr_val * self.config.dyn_tp_flat_mult
+            tp_price_short = close - atr_val * self.config.dyn_tp_flat_mult
+
+        # 10. Risk-sizing distance calculation (§7 locked fix)
+        # Emitted via SignalEvent.strength as the per-unit SL distance in price terms (to be divided
+        # into risk_amount downstream). Strategy has no access to equity.
+        if self.config.sl_mode == "Dynamic (ATR/Matrix)":
+            sl_distance_actual_long_for_risk = sl_distance_dyn_long
+            sl_distance_actual_short_for_risk = sl_distance_dyn_short
+        else:
+            sl_distance_actual_long_for_risk = abs(close - sl_price_long)
+            sl_distance_actual_short_for_risk = abs(sl_price_short - close)
+
+        if self.config.use_risk_sizing and sl_distance_actual_long_for_risk > 0:
+            risk_distance_long = sl_distance_actual_long_for_risk
+        else:
+            risk_distance_long = None
+
+        if self.config.use_risk_sizing and sl_distance_actual_short_for_risk > 0:
+            risk_distance_short = sl_distance_actual_short_for_risk
+        else:
+            risk_distance_short = None
+
+        # 11. Entry signal emission (flat-only)
         symbol = getattr(self.config, "symbol", "XAUUSD")
 
         if entry_long:
             self.trades_today += 1
+            tp_prices_long = (
+                [self.t1_level, self.t2_level, self.t3_level]
+                if (self.config.tp_mode == "Dynamic (ATR/Matrix)" and self.config.dyn_tp_use_matrix)
+                else [tp_price_long]
+            )
+            # SignalEvent.strength on entry signals carries the per-unit SL distance in price terms
+            # (mode-appropriate), to be divided into risk_amount downstream in Portfolio / RiskManager / Engine.
+            # It is None if use_risk_sizing is False or if the distance is <= 0.
             return SignalEvent(
                 type=EventType.SIGNAL,
                 symbol=symbol,
                 direction=1,
-                strength=1.0,
-                sl_price=None,
-                tp_prices=None,
+                strength=risk_distance_long,
+                sl_price=sl_price_long,
+                tp_prices=tp_prices_long,
                 timestamp=event.timestamp,
             )
 
         if entry_short:
             self.trades_today += 1
+            tp_prices_short = (
+                [self.t1_level, self.t2_level, self.t3_level]
+                if (self.config.tp_mode == "Dynamic (ATR/Matrix)" and self.config.dyn_tp_use_matrix)
+                else [tp_price_short]
+            )
+            # SignalEvent.strength on entry signals carries the per-unit SL distance in price terms
+            # (mode-appropriate), to be divided into risk_amount downstream in Portfolio / RiskManager / Engine.
+            # It is None if use_risk_sizing is False or if the distance is <= 0.
             return SignalEvent(
                 type=EventType.SIGNAL,
                 symbol=symbol,
                 direction=-1,
-                strength=1.0,
-                sl_price=None,
-                tp_prices=None,
+                strength=risk_distance_short,
+                sl_price=sl_price_short,
+                tp_prices=tp_prices_short,
                 timestamp=event.timestamp,
             )
 
