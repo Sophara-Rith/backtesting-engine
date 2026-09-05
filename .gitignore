@@ -1,0 +1,28 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Logs (keep directory via .gitkeep, ignore log files)
+logs/*.log
+
+# Raw data files (keep directory via .gitkeep, ignore large data files)
+data/*.csv
+data/*.zip
+data/*.gz
+
+# Generated outputs (keep directory via .gitkeep, ignore generated artifacts)
+outputs/*
+!outputs/.gitkeep
+
+# Operating System and IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
